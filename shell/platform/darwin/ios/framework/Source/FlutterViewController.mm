@@ -37,6 +37,7 @@
   BOOL _initialized;
   BOOL _viewOpaque;
   BOOL _engineNeedsLaunch;
+  BOOL _engineIsOwnedByMe;
 }
 
 #pragma mark - Manage and override all designated initializers
@@ -50,6 +51,7 @@
     _viewOpaque = YES;
     _engine.reset([engine retain]);
     _engineNeedsLaunch = NO;
+    _engineIsOwnedByMe = NO;
     _flutterView.reset([[FlutterView alloc] initWithDelegate:_engine opaque:self.isViewOpaque]);
     _weakFactory = std::make_unique<fml::WeakPtrFactory<FlutterViewController>>(self);
 
@@ -71,6 +73,7 @@
     _flutterView.reset([[FlutterView alloc] initWithDelegate:_engine opaque:self.isViewOpaque]);
     [_engine.get() createShell:nil libraryURI:nil];
     _engineNeedsLaunch = YES;
+    _engineIsOwnedByMe = YES;
     [self loadDefaultSplashScreenView];
     [self performCommonViewControllerInitialization];
   }
@@ -116,8 +119,8 @@
   [self setupNotificationCenterObservers];
 }
 
-- (fml::scoped_nsobject<FlutterEngine>)engine {
-  return _engine;
+- (FlutterEngine*)engine {
+  return _engine.get();
 }
 
 - (fml::WeakPtr<FlutterViewController>)getWeakPtr {
@@ -389,9 +392,9 @@
 
   if (_engineNeedsLaunch) {
     [_engine.get() launchEngine:nil libraryURI:nil];
-    [_engine.get() setViewController:self];
     _engineNeedsLaunch = NO;
   }
+  [_engine.get() setViewController:self];
 
   // Only recreate surface on subsequent appearances when viewport metrics are known.
   // First time surface creation is done on viewDidLayoutSubviews.
@@ -423,12 +426,15 @@
   TRACE_EVENT0("flutter", "viewDidDisappear");
   [self surfaceUpdated:NO];
   [[_engine.get() lifecycleChannel] sendMessage:@"AppLifecycleState.paused"];
-
+  [_engine.get() setViewController:nil];
   [super viewDidDisappear:animated];
 }
 
 - (void)dealloc {
   [[NSNotificationCenter defaultCenter] removeObserver:self];
+  if (_engineIsOwnedByMe) {
+    [_engine.get() shutdown];
+  }
   [super dealloc];
 }
 
@@ -749,34 +755,17 @@ static blink::PointerData::DeviceKind DeviceKindFromTouchType(UITouch* touch) {
 - (void)onLocaleUpdated:(NSNotification*)notification {
   NSArray<NSString*>* preferredLocales = [NSLocale preferredLanguages];
   NSMutableArray<NSString*>* data = [[NSMutableArray new] autorelease];
-
-  // Force prepend the [NSLocale currentLocale] to the front of the list
-  // to ensure we are including the full default locale. preferredLocales
-  // is not guaranteed to include anything beyond the languageCode.
-  NSLocale* currentLocale = [NSLocale currentLocale];
-  NSString* languageCode = [currentLocale objectForKey:NSLocaleLanguageCode];
-  NSString* countryCode = [currentLocale objectForKey:NSLocaleCountryCode];
-  NSString* scriptCode = [currentLocale objectForKey:NSLocaleScriptCode];
-  NSString* variantCode = [currentLocale objectForKey:NSLocaleVariantCode];
-  if (languageCode) {
-    [data addObject:languageCode];
-    [data addObject:(countryCode ? countryCode : @"")];
-    [data addObject:(scriptCode ? scriptCode : @"")];
-    [data addObject:(variantCode ? variantCode : @"")];
-  }
-
-  // Add any secondary locales/languages to the list.
   for (NSString* localeID in preferredLocales) {
-    NSLocale* currentLocale = [[[NSLocale alloc] initWithLocaleIdentifier:localeID] autorelease];
+    NSLocale* currentLocale = [[NSLocale alloc] initWithLocaleIdentifier:localeID];
     NSString* languageCode = [currentLocale objectForKey:NSLocaleLanguageCode];
     NSString* countryCode = [currentLocale objectForKey:NSLocaleCountryCode];
     NSString* scriptCode = [currentLocale objectForKey:NSLocaleScriptCode];
     NSString* variantCode = [currentLocale objectForKey:NSLocaleVariantCode];
-    if (!languageCode) {
+    if (!languageCode || !countryCode) {
       continue;
     }
     [data addObject:languageCode];
-    [data addObject:(countryCode ? countryCode : @"")];
+    [data addObject:countryCode];
     [data addObject:(scriptCode ? scriptCode : @"")];
     [data addObject:(variantCode ? variantCode : @"")];
   }
